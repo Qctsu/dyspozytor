@@ -6,7 +6,7 @@ Skrypt w Pythonie do pobierania danych z konferencji dyspozytorskiej portu Szcze
 
 ## 🛠️ Wymagania
 
-- Python 3.8 lub nowszy
+- Python 3.8 lub wyżej
 - Dostęp do internetu
 
 ---
