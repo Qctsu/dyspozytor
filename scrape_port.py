@@ -3,10 +3,8 @@
 
 import requests
 import re
-import csv
 import os
-from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 import pandas as pd
 
 class PortDataScraper:
@@ -77,17 +75,19 @@ class PortDataScraper:
 
         return participants
     
-    def parse_work_plan_section(self, section_text: str, plan_date: str) -> List[Dict[str, str]]:
+    def parse_work_plan_section(self, section_text: str, plan_date: str, agents: Set[str]) -> List[Dict[str, str]]:
         """Parsuje sekcję planu pracy"""
         records: List[Dict[str, str]] = []
         current_terminal = ""
         current_record: Optional[Dict[str, str]] = None
+        last_agent = ""
+        agent_regex = re.compile(r'\b(' + '|'.join(sorted(map(re.escape, agents), key=len, reverse=True)) + r')\b') if agents else None
 
         # Podział na linie
         lines = section_text.split('<BR>')
 
         for raw_line in lines:
-            line = re.sub(r'<[^>]*>', '', raw_line).strip()
+            line = re.sub(r'<[^>]*>', '', raw_line).replace('\xa0', ' ').strip()
             if not line or re.match(r'^-+$', line):
                 continue
 
@@ -106,6 +106,7 @@ class PortDataScraper:
             ]):
                 current_terminal = line
                 current_record = None
+                last_agent = ""
                 continue
 
             # Pomijaj wiersze nagłówkowe
@@ -130,47 +131,67 @@ class PortDataScraper:
                     'uwagi': 'Prace nieplanowane' if 'NIEPLANOWANE' in upper_line else 'Brak statków'
                 })
                 current_record = None
+                last_agent = ""
                 continue
 
             # Parsowanie danych statku
-            parts = re.split(r'\s{2,}', line)
-            if len(parts) >= 2:
-                nabrze = parts[0]
-                agent_statek = parts[1]
-                rest = parts[2:]
+            if not line:
+                continue
 
-                # agent i statek
-                if re.search(r'\s', agent_statek):
-                    agent, statek = agent_statek.split(None, 1)
-                else:
-                    agent = agent_statek
-                    statek = rest[0] if rest else ''
-                    rest = rest[1:] if rest else []
+            match = agent_regex.search(line) if agent_regex else None
+            if match:
+                nabrze = line[:match.start()].strip()
+                agent = match.group(1)
+                rest_line = line[match.end():]
+                last_agent = agent
+            else:
+                parts = re.split(r'\s{2,}', line, maxsplit=1)
+                nabrze = parts[0].strip()
+                rest_line = parts[1] if len(parts) > 1 else ''
+                agent = last_agent
 
-                towar = rest[0] if rest else ''
-                rest = rest[1:] if rest else []
+            ton_regex = re.compile(r'\d+\s*(?:[a-z]{1,3}-[a-z]{1,3}|wag|sam)')
+            ton_match = ton_regex.search(rest_line)
+            if ton_match:
+                before_ton = rest_line[:ton_match.start()].rstrip()
+                after_ton = rest_line[ton_match.start():].strip()
+            else:
+                before_ton = rest_line.strip()
+                after_ton = ''
 
-                ton = rest[0] if rest else ''
-                rest = rest[1:] if rest else []
-
-                relacja = ''
-                sped = ''
-                if rest:
-                    relacja_sped = rest[0]
-                    rest = rest[1:]
-                    if re.search(r'\s', relacja_sped):
-                        relacja, sped = relacja_sped.split(None, 1)
+            # statek i towar
+            statek = ''
+            towar = ''
+            if before_ton:
+                statek_towar = [p for p in re.split(r'\s{2,}', before_ton) if p]
+                if len(statek_towar) >= 2:
+                    statek = statek_towar[0].strip()
+                    towar = statek_towar[1].strip()
+                elif statek_towar:
+                    tokens = statek_towar[0].split()
+                    if agent and len(tokens) > 2:
+                        statek = ' '.join(tokens[:-2])
+                        towar = ' '.join(tokens[-2:])
+                    elif agent and len(tokens) == 2:
+                        statek, towar = tokens
+                    elif not agent and len(tokens) > 1:
+                        statek = tokens[0]
+                        towar = ' '.join(tokens[1:])
                     else:
-                        relacja = relacja_sped
-                        if rest:
-                            sped = rest[0]
-                            rest = rest[1:]
+                        statek = statek_towar[0].strip()
 
-                zmiana_i = rest[0] if len(rest) > 0 else ''
-                zmiana_ii = rest[1] if len(rest) > 1 else ''
-                zmiana_iii = rest[2] if len(rest) > 2 else ''
-                uwagi = ' '.join(rest[3:]) if len(rest) > 3 else ''
+            after_parts = re.split(r'\s{2,}', after_ton)
+            ton = after_parts[0].strip() if after_parts else ''
+            remainder = [p.strip() for p in after_parts[1:]]
 
+            relacja = remainder[0] if len(remainder) > 0 else ''
+            sped = remainder[1] if len(remainder) > 1 else ''
+            zmiana_i = remainder[2] if len(remainder) > 2 else ''
+            zmiana_ii = remainder[3] if len(remainder) > 3 else ''
+            zmiana_iii = remainder[4] if len(remainder) > 4 else ''
+            uwagi = ' '.join(remainder[5:]) if len(remainder) > 5 else ''
+
+            if any([statek, towar, ton, relacja, sped, zmiana_i, zmiana_ii, zmiana_iii, uwagi]):
                 record = {
                     'data_planu': plan_date,
                     'terminal': current_terminal,
@@ -199,6 +220,8 @@ class PortDataScraper:
 
                 records.append(record)
                 current_record = record
+                if agent:
+                    last_agent = agent
             elif current_record:
                 # Kontynuacja uwag z poprzedniego rekordu
                 extra = ' '.join(line.split())
@@ -206,21 +229,21 @@ class PortDataScraper:
 
         return records
     
-    def extract_work_plans(self, content: str) -> List[Dict[str, str]]:
+    def extract_work_plans(self, content: str, agents: Set[str]) -> List[Dict[str, str]]:
         """Wyciąga plany pracy dla wszystkich dat"""
         all_records = []
-        
+
         # Znajdź wszystkie sekcje planów pracy
         plan_sections = re.findall(
             r'PLAN\s+PRACY\s+DOBOWO-ZMIANOWY\s+NA\s+DZIEŃ\s+(\d{2}-\d{2}-\d{4})[^<]*?<BR>(.*?)(?=PLAN\s+PRACY\s+DOBOWO-ZMIANOWY|STAN\s+WODY|$)',
-            content, 
+            content,
             re.DOTALL | re.IGNORECASE
         )
-        
+
         for plan_date, section_content in plan_sections:
-            records = self.parse_work_plan_section(section_content, plan_date)
+            records = self.parse_work_plan_section(section_content, plan_date, agents)
             all_records.extend(records)
-        
+
         return all_records
     
     def data_exists(self, conference_date: str, work_plan_dates: List[str]) -> bool:
@@ -329,7 +352,8 @@ class PortDataScraper:
         
         # Wyciągnij dane
         participants = self.extract_participants(content)
-        work_plans = self.extract_work_plans(content)
+        agents = {p['nazwa'] for p in participants}
+        work_plans = self.extract_work_plans(content, agents)
         
         print(f"Znaleziono {len(participants)} uczestników")
         print(f"Znaleziono {len(work_plans)} rekordów planów pracy")
