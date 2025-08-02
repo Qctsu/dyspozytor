@@ -10,13 +10,18 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 class PortDataScraper:
-    def __init__(self, csv_file_path: str = "port_data.csv"):
-        self.url = "http://www.dyspozytor.port.szczecin.pl"
+    def __init__(self, csv_file_path: str = "port_data.csv", source: Optional[str] = None):
+        self.url = source or "http://www.dyspozytor.port.szczecin.pl"
         self.csv_file = csv_file_path
         self.encoding = 'iso-8859-2'  # Na podstawie meta tagu w HTML
         
     def fetch_page_content(self) -> Optional[str]:
         """Pobiera zawartość strony"""
+        # Pozwala na użycie lokalnego pliku HTML do testów
+        if os.path.isfile(self.url):
+            with open(self.url, encoding=self.encoding) as f:
+                return f.read()
+
         try:
             response = requests.get(self.url, timeout=30)
             response.encoding = self.encoding
@@ -43,42 +48,54 @@ class PortDataScraper:
         participants = []
         
         # Znajdź sekcję z uczestnikami
-        participants_pattern = r'Uczestnicy:\s*<BR>\s*------<BR>(.*?)(?=<BR>\s*<BR>\s*PLAN\s+PRACY|$)'
+        participants_pattern = r'Uczestnicy:\s*<BR>\s*------<BR>(.*?)(?:<BR>\s*<BR>|PLAN\s+PRACY|$)'
         participants_match = re.search(participants_pattern, content, re.DOTALL | re.IGNORECASE)
-        
-        if participants_match:
-            participants_text = participants_match.group(1)
-            # Wyciąg linii z uczestnikami (format: NAZWA - status)
-            lines = re.findall(r'([A-Z0-9\.\s]+?)\s*-\s*([^<]*?)(?:<BR>|$)', participants_text)
-            
-            for name, status in lines:
+
+        if not participants_match:
+            return participants
+
+        participants_text = participants_match.group(1)
+
+        # Każda linia może zawierać dwóch uczestników w formacie "NAZWA - status"
+        name_status_pattern = r'([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż0-9\. ]+?)\s*-\s*(.*?)(?=\s{2,}[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż0-9\. ]+\s*-|$)'
+
+        for raw_line in participants_text.split('<BR>'):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+
+            pairs = re.findall(name_status_pattern, raw_line)
+            for name, status in pairs:
                 name = name.strip()
-                status = status.strip()
+                status = status.strip() or 'Brak danych'
                 if name and name not in ['', '-', 'HD', 'Główny Dysp.Portu']:
                     participants.append({
                         'typ': 'Uczestnik',
                         'nazwa': name,
-                        'status': status if status != '---' else 'Brak danych'
+                        'status': 'Brak danych' if status == '---' else status
                     })
-        
+
         return participants
     
     def parse_work_plan_section(self, section_text: str, plan_date: str) -> List[Dict[str, str]]:
         """Parsuje sekcję planu pracy"""
-        records = []
+        records: List[Dict[str, str]] = []
         current_terminal = ""
-        
+        current_record: Optional[Dict[str, str]] = None
+
         # Podział na linie
         lines = section_text.split('<BR>')
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
+
+        for raw_line in lines:
+            line = re.sub(r'<[^>]*>', '', raw_line).strip()
+            if not line or re.match(r'^-+$', line):
                 continue
-                
-            # Sprawdź czy to nazwa terminalu/sekcji
-            if any(keyword in line.upper() for keyword in [
-                'DB PORT SZCZECIN', 'TERMINAL', 'FAST TERMINALS', 
+
+            upper_line = line.upper()
+
+            # Nazwa terminalu/sekcji
+            if any(keyword in upper_line for keyword in [
+                'DB PORT SZCZECIN', 'TERMINAL', 'FAST TERMINALS',
                 'VITERRA', 'BULK CARGO', 'GENERAL CARGO', 'BUNGE',
                 'PKN ORLEN', 'BALTCHEM', 'EUROTERMINAL', 'PORT NOWE',
                 'PORT TRZEBIE', 'PORT STEPNICA', 'PORT POLICE',
@@ -87,11 +104,16 @@ class PortDataScraper:
                 'BALTIC STEVEDORING', 'ELEWATOR', 'ORLEN GAZ',
                 'MORSKA STOCZNIA', 'STOCZNIA REMONTOWA'
             ]):
-                current_terminal = re.sub(r'<[^>]*>', '', line).strip()
+                current_terminal = line
+                current_record = None
                 continue
-            
-            # Sprawdź czy to informacja o braku prac
-            if 'prace nieplanowane' in line.lower() or 'brak statków' in line.lower():
+
+            # Pomijaj wiersze nagłówkowe
+            if 'NABRZ' in upper_line and 'AGENT' in upper_line:
+                continue
+
+            # Informacja o braku prac
+            if 'PRACE NIEPLANOWANE' in upper_line or 'BRAK STATK' in upper_line:
                 records.append({
                     'data_planu': plan_date,
                     'terminal': current_terminal,
@@ -105,38 +127,83 @@ class PortDataScraper:
                     'zmiana_i': '',
                     'zmiana_ii': '',
                     'zmiana_iii': '',
-                    'uwagi': 'Prace nieplanowane' if 'nieplanowane' in line.lower() else 'Brak statków'
+                    'uwagi': 'Prace nieplanowane' if 'NIEPLANOWANE' in upper_line else 'Brak statków'
                 })
+                current_record = None
                 continue
-            
-            # Parsuj linię z danymi statku (uproszczona wersja)
-            # Format: Nabrz Agent Statek Towar Ton Relacja Sped I II III
-            parts = re.split(r'\s{2,}', line)  # Dziel po 2+ spacjach
-            
-            if len(parts) >= 3:  # Minimalne wymagania dla rekordu
+
+            # Parsowanie danych statku
+            parts = re.split(r'\s{2,}', line)
+            if len(parts) >= 2:
+                nabrze = parts[0]
+                agent_statek = parts[1]
+                rest = parts[2:]
+
+                # agent i statek
+                if re.search(r'\s', agent_statek):
+                    agent, statek = agent_statek.split(None, 1)
+                else:
+                    agent = agent_statek
+                    statek = rest[0] if rest else ''
+                    rest = rest[1:] if rest else []
+
+                towar = rest[0] if rest else ''
+                rest = rest[1:] if rest else []
+
+                ton = rest[0] if rest else ''
+                rest = rest[1:] if rest else []
+
+                relacja = ''
+                sped = ''
+                if rest:
+                    relacja_sped = rest[0]
+                    rest = rest[1:]
+                    if re.search(r'\s', relacja_sped):
+                        relacja, sped = relacja_sped.split(None, 1)
+                    else:
+                        relacja = relacja_sped
+                        if rest:
+                            sped = rest[0]
+                            rest = rest[1:]
+
+                zmiana_i = rest[0] if len(rest) > 0 else ''
+                zmiana_ii = rest[1] if len(rest) > 1 else ''
+                zmiana_iii = rest[2] if len(rest) > 2 else ''
+                uwagi = ' '.join(rest[3:]) if len(rest) > 3 else ''
+
                 record = {
                     'data_planu': plan_date,
                     'terminal': current_terminal,
-                    'nabrze': parts[0] if len(parts) > 0 else '',
-                    'agent': parts[1] if len(parts) > 1 else '',
-                    'statek': parts[2] if len(parts) > 2 else '',
-                    'towar': parts[3] if len(parts) > 3 else '',
-                    'ton': parts[4] if len(parts) > 4 else '',
-                    'relacja': parts[5] if len(parts) > 5 else '',
-                    'sped': parts[6] if len(parts) > 6 else '',
-                    'zmiana_i': parts[7] if len(parts) > 7 else '',
-                    'zmiana_ii': parts[8] if len(parts) > 8 else '',
-                    'zmiana_iii': parts[9] if len(parts) > 9 else '',
-                    'uwagi': ''
+                    'nabrze': nabrze,
+                    'agent': agent,
+                    'statek': statek,
+                    'towar': towar,
+                    'ton': ton,
+                    'relacja': relacja,
+                    'sped': sped,
+                    'zmiana_i': zmiana_i,
+                    'zmiana_ii': zmiana_ii,
+                    'zmiana_iii': zmiana_iii,
+                    'uwagi': uwagi
                 }
-                
-                # Usuń tagi HTML z wszystkich pól
+
+                # Jeżeli kolumna sped zawiera tekst z małymi literami, potraktuj ją jako uwagi
+                if re.search(r'[a-z]', record['sped']):
+                    record['uwagi'] = ' '.join(filter(None, [record['sped'], record['uwagi']])).strip()
+                    record['sped'] = ''
+
+                # Normalizuj spacje
                 for key, value in record.items():
                     if isinstance(value, str):
-                        record[key] = re.sub(r'<[^>]*>', '', value).strip()
-                
+                        record[key] = ' '.join(value.split())
+
                 records.append(record)
-        
+                current_record = record
+            elif current_record:
+                # Kontynuacja uwag z poprzedniego rekordu
+                extra = ' '.join(line.split())
+                current_record['uwagi'] = ' '.join(filter(None, [current_record.get('uwagi'), extra]))
+
         return records
     
     def extract_work_plans(self, content: str) -> List[Dict[str, str]]:
@@ -271,5 +338,8 @@ class PortDataScraper:
         self.save_to_csv(conference_date, participants, work_plans)
 
 if __name__ == "__main__":
-    scraper = PortDataScraper("port_data.csv")
+    import sys
+
+    source = sys.argv[1] if len(sys.argv) > 1 else None
+    scraper = PortDataScraper("port_data.csv", source=source)
     scraper.run()

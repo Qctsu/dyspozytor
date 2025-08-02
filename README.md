@@ -17,7 +17,7 @@ Skrypt w Pythonie do pobierania danych z konferencji dyspozytorskiej portu Szcze
 
 Upewnij się, że masz w folderze:
 
-- `port_scraper.py` – główny skrypt
+- `scrape_port.py` – główny skrypt
 - `requirements.txt` – lista zależności
 
 ### 2. (Opcjonalnie) Utwórz wirtualne środowisko
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 Uruchomienie polega na wywołaniu skryptu z poziomu terminala lub CMD:
 
 ```bash
-python port_scraper.py
+python scrape_port.py [opcjonalnie_ścieżka_do_pliku_html]
 ```
 
 Skrypt automatycznie pobierze dane ze strony:
@@ -83,7 +83,7 @@ Dzięki kodowaniu `utf-8-sig` plik otwiera się poprawnie w Excelu (bez krzaczk�
 ## 📝 Przykład użycia
 
 ```bash
-python port_scraper.py
+python scrape_port.py
 ```
 
 Efekt: dane zostaną pobrane i zapisane (lub zaktualizowane) w pliku `port_data.csv`.
