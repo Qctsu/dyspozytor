@@ -1,0 +1,13 @@
+C:\dyspozytor>python scrape_port.py
+Pobieranie danych ze strony portu...
+Data konferencji: 01-08-2025
+Daty planów pracy: ['02-08-2025', '03-08-2025', '04-08-2025']
+Znaleziono 51 uczestników
+Znaleziono 191 rekordów planów pracy
+Dane zapisane do: port_data.csv
+
+C:\dyspozytor>python scrape_port.py
+Pobieranie danych ze strony portu...
+Data konferencji: 01-08-2025
+Daty planów pracy: ['02-08-2025', '03-08-2025', '04-08-2025']
+Dane dla tych dat już istnieją w pliku CSV. Pomijam pobieranie.
